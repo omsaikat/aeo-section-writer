@@ -5,6 +5,10 @@ import { TTLCache } from "./cache";
 
 const BASE = (process.env.DATAFORSEO_BASE_URL || "https://api.dataforseo.com/v3").replace(/\/+$/, "");
 const WEEK = 7 * 24 * 60 * 60 * 1000;
+// "No AI Overview / no answer" is often temporary, so it is only remembered for a day.
+const DAY = 24 * 60 * 60 * 1000;
+// One slow DataForSEO call must not hold the whole run until the platform time limit.
+const REQUEST_TIMEOUT_MS = 100_000;
 const cache = new TTLCache<unknown>(WEEK, 2000);
 
 export type Keyword = {
@@ -27,18 +31,24 @@ export type EngineAnswer = {
   query?: string;
 };
 
+// Trimmed, because a space copied along with the login or password makes every call fail.
+const login = () => (process.env.DATAFORSEO_LOGIN ?? "").trim();
+const password = () => (process.env.DATAFORSEO_PASSWORD ?? "").trim();
+
 export function dataForSeoConfigured(): boolean {
-  return Boolean(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD);
+  return Boolean(login() && password());
 }
 
 async function post(path: string, body: unknown, signal?: AbortSignal): Promise<any> {
-  const auth = Buffer.from(`${process.env.DATAFORSEO_LOGIN}:${process.env.DATAFORSEO_PASSWORD}`).toString("base64");
+  const auth = Buffer.from(`${login()}:${password()}`).toString("base64");
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" },
     body: JSON.stringify([body]),
-    signal,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+  if (res.status === 401) throw new Error("DataForSEO rejected the login or password");
   if (!res.ok) throw new Error(`DataForSEO HTTP ${res.status}`);
   const json = await res.json();
   const task = json?.tasks?.[0];
@@ -142,7 +152,7 @@ export async function googleAnswers(
   const voice: EngineAnswer = { engine: "Voice", present: voiceParts.length > 0, text: voiceParts.join("\n").slice(0, 4000), sources: [...voiceLinks.values()].slice(0, 8) };
 
   const out = { aio, voice };
-  cache.set(key, out);
+  cache.set(key, out, aio.present ? WEEK : DAY);
   return out;
 }
 
@@ -169,6 +179,6 @@ export async function llmAnswer(
   collectLinks(result?.items ?? [], links);
   const text = texts.join("\n").slice(0, 4000);
   const out: EngineAnswer = { engine, present: Boolean(text), text, sources: [...links.values()].slice(0, 12) };
-  cache.set(key, out);
+  cache.set(key, out, out.present ? WEEK : DAY);
   return out;
 }
