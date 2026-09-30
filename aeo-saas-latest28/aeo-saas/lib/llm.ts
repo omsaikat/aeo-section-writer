@@ -1,24 +1,37 @@
 // One interface for any LLM provider.
 //   LLM_PROVIDER=anthropic  → Claude via the Anthropic SDK
+//   LLM_PROVIDER=gemini     → Google Gemini (only GEMINI_API_KEY is required)
 //   LLM_PROVIDER=openai     → any OpenAI-compatible Chat Completions API:
-//                             OpenAI, Google Gemini, OpenRouter, Groq, DeepSeek, Mistral, Together, a local Ollama…
+//                             OpenAI, OpenRouter, Groq, DeepSeek, Mistral, Together, a local Ollama…
 import Anthropic from "@anthropic-ai/sdk";
 
 export type LlmError = Error & { status?: number };
 
 const PROVIDER = (process.env.LLM_PROVIDER || "anthropic").toLowerCase();
 
-export const MODEL = process.env.LLM_MODEL || process.env.CLAUDE_MODEL || "claude-opus-5-5";
+// Google's OpenAI-compatible endpoint. "gemini-flash-latest" always points at the current Flash model;
+// set LLM_MODEL to pin a specific one.
+const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+const GEMINI_DEFAULT_MODEL = "gemini-flash-latest";
+
+export const MODEL = process.env.LLM_MODEL || process.env.CLAUDE_MODEL
+  || (PROVIDER === "gemini" ? GEMINI_DEFAULT_MODEL : "claude-opus-5-5");
 export const FAST_MODEL = process.env.LLM_FAST_MODEL || process.env.CLAUDE_FAST_MODEL || MODEL;
+
+const apiBase = () => (process.env.LLM_BASE_URL || (PROVIDER === "gemini" ? GEMINI_BASE_URL : "")).replace(/\/+$/, "");
+const apiKey = () => (PROVIDER === "gemini" ? process.env.GEMINI_API_KEY || process.env.LLM_API_KEY : process.env.LLM_API_KEY);
+/** Gemini "thinking" counts toward the output limit, so leave it room before the JSON answer. */
+const outputTokens = (n: number) => (PROVIDER === "gemini" ? Math.min(Math.max(n * 2, 8192), 32768) : n);
 
 export function llmConfigError(): string | null {
   if (PROVIDER === "anthropic") return process.env.ANTHROPIC_API_KEY ? null : "Server is missing ANTHROPIC_API_KEY.";
+  if (PROVIDER === "gemini") return apiKey() ? null : "Server is missing GEMINI_API_KEY.";
   if (PROVIDER === "openai") {
     if (!process.env.LLM_BASE_URL) return "Server is missing LLM_BASE_URL.";
     if (!process.env.LLM_MODEL) return "Server is missing LLM_MODEL.";
     return null;
   }
-  return `Unknown LLM_PROVIDER "${PROVIDER}". Use "anthropic" or "openai".`;
+  return `Unknown LLM_PROVIDER "${PROVIDER}". Use "anthropic", "gemini" or "openai".`;
 }
 
 /** Ask once and return the whole answer. */
@@ -28,7 +41,7 @@ export async function complete(model: string, prompt: string, maxTokens: number,
     const r = await client.messages.create({ model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }, { signal });
     return r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
   }
-  const res = await openaiFetch({ model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }, signal);
+  const res = await openaiFetch({ model, max_tokens: outputTokens(maxTokens), messages: [{ role: "user", content: prompt }] }, signal);
   const json = await res.json();
   return String(json?.choices?.[0]?.message?.content ?? "");
 }
@@ -47,7 +60,7 @@ export async function streamText(
     return out;
   }
 
-  const res = await openaiFetch({ model, max_tokens: maxTokens, stream: true, messages: [{ role: "user", content: prompt }] }, signal);
+  const res = await openaiFetch({ model, max_tokens: outputTokens(maxTokens), stream: true, messages: [{ role: "user", content: prompt }] }, signal);
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -72,9 +85,10 @@ export async function streamText(
 }
 
 async function openaiFetch(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
-  const base = process.env.LLM_BASE_URL!.replace(/\/+$/, "");
+  const base = apiBase();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (process.env.LLM_API_KEY) headers.Authorization = `Bearer ${process.env.LLM_API_KEY}`;
+  const key = apiKey();
+  if (key) headers.Authorization = `Bearer ${key}`;
   if (base.includes("openrouter.ai")) {
     headers["HTTP-Referer"] = process.env.APP_URL || "http://localhost:3000";
     headers["X-Title"] = "AEO Section Writer";
