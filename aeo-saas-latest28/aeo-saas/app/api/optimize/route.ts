@@ -31,8 +31,20 @@ function hostOf(site: string): string {
   catch { return ""; }
 }
 const norm = (t: unknown) => String(t ?? "").replace(/\s+/g, " ").trim();
-// Engine failures are logged on the server; the browser only learns that the engine was unavailable.
-const errText = (e: any) => { console.error("engine failed:", e?.message ?? e); return "This engine was unavailable for this run."; };
+// Engine failures are logged in full on the server. The browser gets a short reason the site owner can act on,
+// without provider details such as balances.
+const errText = (e: any) => {
+  const m = String(e?.message ?? e ?? "");
+  console.error("engine failed:", m);
+  if (/login or password|HTTP 401|4010\d|unauthori|not authori/i.test(m)) return "Unavailable: DataForSEO rejected the API login or password.";
+  if (/payment|balance|funds|4020\d/i.test(m)) return "Unavailable: the DataForSEO account needs a top-up.";
+  if (/HTTP 403|4030\d|forbidden|not allowed|access denied/i.test(m) || /\bIP\b/.test(m)) return "Unavailable: DataForSEO blocked this request (check IP whitelist or API access).";
+  if (/abort|timeout|timed out/i.test(m)) return "Unavailable: DataForSEO took too long to answer.";
+  if (/fetch failed|ENOTFOUND|ECONN|network/i.test(m)) return "Unavailable: couldn't reach DataForSEO.";
+  // Anything else: pass DataForSEO's own short message on (amounts removed), so the cause can be fixed.
+  const said = m.replace(/^DataForSEO\s*\d*:?\s*/i, "").replace(/\d+\.\d+/g, "#").slice(0, 140);
+  return said ? `Unavailable: DataForSEO said "${said}".` : "This engine was unavailable for this run.";
+};
 const userError = (m: string) => Object.assign(new Error(m), { userMessage: m });
 
 export async function POST(req: Request) {
